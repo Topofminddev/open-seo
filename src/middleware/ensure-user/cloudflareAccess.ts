@@ -87,12 +87,30 @@ export async function resolveCloudflareAccessContext(
     throw classifyAccessVerificationError(error);
   }
 
-  const userId = typeof payload.sub === "string" ? payload.sub : null;
+  const userId =
+    typeof payload.sub === "string" && payload.sub ? payload.sub : null;
   const userEmail = typeof payload.email === "string" ? payload.email : null;
 
-  if (!userId || !userEmail) {
-    throw new AppError("UNAUTHENTICATED");
+  if (userId && userEmail) {
+    return resolveSharedWorkspaceContext(userId, userEmail);
   }
 
-  return resolveSharedWorkspaceContext(userId, userEmail);
+  // A service-token JWT (Service Auth policy) verifies against the same team
+  // JWKS and audience but carries no user identity: `sub` is empty and there
+  // is no `email` claim; `common_name` names the token. Map it to a stable
+  // synthetic member of the shared workspace so headless callers (crons,
+  // agents) can use the MCP and API like any signed-in workspace member.
+  const commonName =
+    typeof payload.common_name === "string" && payload.common_name
+      ? payload.common_name
+      : null;
+
+  if (commonName) {
+    return resolveSharedWorkspaceContext(
+      `svc-${commonName}`,
+      `${commonName.replace(/[^a-zA-Z0-9._-]/g, "-")}@service-token.local`,
+    );
+  }
+
+  throw new AppError("UNAUTHENTICATED");
 }
