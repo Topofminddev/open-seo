@@ -5,6 +5,7 @@ vi.mock("@/server/lib/runtime-env", () => ({
 }));
 
 import {
+  fetchRankCheckSerp,
   fetchRankCheckTaskResult,
   postRankCheckTasks,
 } from "@/server/lib/dataforseo/serp";
@@ -78,6 +79,12 @@ describe("rank check task queue", () => {
     expect(JSON.stringify(body)).not.toMatch(
       /stop_crawl_on_match|find_targets_in/,
     );
+    // Every queued rank check asks DataForSEO to undo poisoned SERPs.
+    expect(body).toMatchObject([
+      { resolve_poisoned_results: true },
+      { resolve_poisoned_results: true },
+      { resolve_poisoned_results: true },
+    ]);
     expect(result.data).toEqual([
       {
         keyword: "alpha",
@@ -168,5 +175,57 @@ describe("rank check task queue", () => {
         serpFeatures: ["organic"],
       },
     });
+  });
+
+  it("credits a google.com/goto result to its breadcrumb site and asks for unpoisoned results", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        status_code: 20000,
+        tasks: [
+          {
+            id: "live-a",
+            status_code: 20000,
+            cost: 0.002,
+            path: ["v3", "serp", "google", "organic", "live", "advanced"],
+            result: [
+              {
+                items: [
+                  {
+                    type: "organic",
+                    rank_group: 1,
+                    domain: "google.com",
+                    url: "https://www.google.com/goto?url=CAESabc",
+                    breadcrumb: "https://www.other.com › page",
+                  },
+                  {
+                    type: "organic",
+                    rank_group: 2,
+                    domain: "google.com",
+                    url: "https://www.google.com/goto?url=CAESdef",
+                    breadcrumb: "https://www.example.com › courses",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchRankCheckSerp({
+      keyword: "alpha",
+      keywordId: "kw-1",
+      locationCode: 2840,
+      languageCode: "en",
+      device: "desktop",
+      targetDomain: "example.com",
+      depth: 40,
+    });
+
+    expect(result.data.position).toBe(2);
+    const body = parseDataforseoRequestBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body).toMatchObject([{ resolve_poisoned_results: true }]);
+    expect(JSON.stringify(body)).not.toMatch(/stop_crawl_on_match/);
   });
 });

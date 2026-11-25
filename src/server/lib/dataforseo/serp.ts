@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isGoogleRedirect } from "@/shared/google-serp-url";
 import {
   SerpGoogleLocalFinderLiveAdvancedRequestInfo,
   SerpGoogleMapsLiveAdvancedRequestInfo,
@@ -20,6 +21,27 @@ import { AppError } from "@/server/lib/errors";
 /** DataForSEO bills SERPs in pages of 10; depth outside 10-100 is rejected. */
 function clampSerpDepth(depth: number): number {
   return Math.min(100, Math.max(10, depth));
+}
+
+/**
+ * DataForSEO checks the page against Google's plain web results and swaps in
+ * those results when Google served a poisoned page (listings replaced, which
+ * reads as a false ranking drop). Costs one more SERP page per task, poisoned
+ * or not. The SDK (2.0.19) predates the field and serializes only the fields it
+ * knows, so it is added at JSON time. Rank checks only (upstream #1326).
+ */
+function withPoisonedResultsResolved<
+  T extends { toJSON(data?: unknown): unknown },
+>(request: T): T {
+  const toJSON = request.toJSON.bind(request);
+  return Object.assign(request, {
+    toJSON: (data?: unknown) => {
+      const json = toJSON(data);
+      return json && typeof json === "object"
+        ? { ...json, resolve_poisoned_results: true }
+        : json;
+    },
+  });
 }
 
 // Kept as a hand-written schema: the SDK's BaseSerpApiElementItem type omits
@@ -57,7 +79,33 @@ const serpSnapshotItemSchema = z
       .nullable()
       .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .transform(unwrapGoogleRedirect);
+
+/**
+ * Google wraps many organic results in a google.com/goto redirect, and
+ * DataForSEO reports them with domain "google.com" and an encoded URL when it
+ * could not resolve the redirect (about half the time on live requests). The
+ * real site is only in the breadcrumb ("https://www.runnersworld.com › gear").
+ * When the breadcrumb isn't a URL the domain is unknown, which beats crediting
+ * google.com with the result. Ported from upstream open-seo (#1135).
+ */
+function unwrapGoogleRedirect<
+  T extends { url?: string | null; breadcrumb?: string | null },
+>(item: T): T & { domain?: string | null } {
+  if (!item.url || !isGoogleRedirect(item.url)) return item;
+  return { ...item, domain: breadcrumbHost(item.breadcrumb) };
+}
+
+function breadcrumbHost(breadcrumb: string | null | undefined): string | null {
+  const first = breadcrumb?.split("›")[0]?.trim();
+  if (!first || !/^https?:\/\//i.test(first)) return null;
+  try {
+    return new URL(first).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
 
 export type SerpLiveItem = z.infer<typeof serpSnapshotItemSchema>;
 
@@ -135,14 +183,16 @@ export async function fetchRankCheckSerp(input: {
     ? { location_name: input.locationName }
     : { location_code: input.locationCode };
   const response = await serpApi().googleOrganicLiveAdvanced([
-    new SerpGoogleOrganicLiveAdvancedRequestInfo({
-      keyword: input.keyword,
-      ...locationParams,
-      language_code: input.languageCode,
-      device: input.device,
-      os: input.device === "desktop" ? "windows" : "android",
-      depth,
-    }),
+    withPoisonedResultsResolved(
+      new SerpGoogleOrganicLiveAdvancedRequestInfo({
+        keyword: input.keyword,
+        ...locationParams,
+        language_code: input.languageCode,
+        device: input.device,
+        os: input.device === "desktop" ? "windows" : "android",
+        depth,
+      }),
+    ),
   ]);
 
   // "No Search Results" (40501) is valid for obscure/new keywords — treat as an
@@ -196,8 +246,8 @@ export async function postRankCheckTasks(input: {
     ? { location_name: input.locationName }
     : { location_code: input.locationCode };
   const response = await serpApi().googleOrganicTaskPost(
-    input.tasks.map(
-      (task) =>
+    input.tasks.map((task) =>
+      withPoisonedResultsResolved(
         new SerpGoogleOrganicTaskPostRequestInfo({
           keyword: task.keyword,
           ...locationParams,
@@ -209,6 +259,7 @@ export async function postRankCheckTasks(input: {
           // DataForSEO task id back to our keyword without relying on order.
           tag: `${task.keywordId}:${task.device}`,
         }),
+      ),
     ),
   );
 
