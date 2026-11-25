@@ -1,6 +1,5 @@
 import { z } from "zod";
 import {
-  SerpApiStopCrawlOnMatchInfo,
   SerpGoogleLocalFinderLiveAdvancedRequestInfo,
   SerpGoogleMapsLiveAdvancedRequestInfo,
   SerpGoogleOrganicLiveAdvancedRequestInfo,
@@ -21,26 +20,6 @@ import { AppError } from "@/server/lib/errors";
 /** DataForSEO bills SERPs in pages of 10; depth outside 10-100 is rejected. */
 function clampSerpDepth(depth: number): number {
   return Math.min(100, Math.max(10, depth));
-}
-
-/**
- * Stop crawling SERP pages once the target domain is found — DataForSEO only
- * bills the pages crawled, so a page-1 ranking at depth 20 costs one page
- * instead of two. Matching is restricted to organic results and uses
- * with_subdomains, mirroring buildRankCheckResult exactly: without
- * find_targets_in, a sitelink or PAA mention could stop the crawl before the
- * domain's organic listing and record a false "not ranking".
- */
-function stopCrawlOnTarget(targetDomain: string) {
-  return {
-    stop_crawl_on_match: [
-      new SerpApiStopCrawlOnMatchInfo({
-        match_value: targetDomain,
-        match_type: "with_subdomains",
-      }),
-    ],
-    find_targets_in: ["organic"],
-  };
 }
 
 // Kept as a hand-written schema: the SDK's BaseSerpApiElementItem type omits
@@ -163,7 +142,6 @@ export async function fetchRankCheckSerp(input: {
       device: input.device,
       os: input.device === "desktop" ? "windows" : "android",
       depth,
-      ...stopCrawlOnTarget(input.targetDomain),
     }),
   ]);
 
@@ -227,11 +205,6 @@ export async function postRankCheckTasks(input: {
           device: task.device,
           os: task.device === "desktop" ? "windows" : "android",
           depth,
-          // Queued tasks are billed provisionally at full depth at post time;
-          // task_get later reports the reduced actual cost when the crawl
-          // stopped early. We meter customers on the post-time amount —
-          // collection-time metering is a possible future optimization.
-          ...stopCrawlOnTarget(input.targetDomain),
           // Echoed back on the response entry and task_get; used to map a
           // DataForSEO task id back to our keyword without relying on order.
           tag: `${task.keywordId}:${task.device}`,
@@ -286,8 +259,7 @@ type RankCheckTaskOutcome =
 /**
  * Collect one queued task's result. Deliberately not metered and not wrapped
  * in the billing envelope: collection is free (the task was charged at
- * task_post), and the task_get response carries the task's settled cost
- * (reduced when stop_crawl_on_match ended the crawl early) — running it
+ * task_post), and the task_get response carries the task's settled cost — running it
  * through the metering seam would charge the customer twice.
  */
 export async function fetchRankCheckTaskResult(input: {

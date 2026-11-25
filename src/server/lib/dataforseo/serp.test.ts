@@ -71,18 +71,13 @@ describe("rank check task queue", () => {
       ),
     ).toEqual(["https://api.dataforseo.com/v3/serp/google/organic/task_post"]);
 
-    // Every posted task asks DataForSEO to stop crawling at the target's
-    // organic listing — that is what cuts the actual crawl cost for ranking
-    // domains without false "not ranking" stops on sitelinks/PAA mentions.
-    const stopCrawl = {
-      stop_crawl_on_match: [
-        { match_value: "example.com", match_type: "with_subdomains" },
-      ],
-      find_targets_in: ["organic"],
-    };
-    expect(
-      parseDataforseoRequestBody(fetchMock.mock.calls[0]?.[1]),
-    ).toMatchObject([stopCrawl, stopCrawl, stopCrawl]);
+    // DataForSEO retired stop_crawl_on_match (and find_targets_in) on
+    // 2026-11-30: requests carrying them are rejected, so no task may send them.
+    const body = parseDataforseoRequestBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body).toHaveLength(3);
+    expect(JSON.stringify(body)).not.toMatch(
+      /stop_crawl_on_match|find_targets_in/,
+    );
     expect(result.data).toEqual([
       {
         keyword: "alpha",

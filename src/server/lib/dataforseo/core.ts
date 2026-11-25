@@ -130,7 +130,48 @@ function http(
 // read lazily (it lives in the Worker env, not in module scope).
 export const labsApi = () => new DataforseoLabsApi(API_BASE, http());
 export const keywordsDataApi = () => new KeywordsDataApi(API_BASE, http());
-export const serpApi = () => new SerpApi(API_BASE, http());
+/**
+ * DataForSEO retired stop_crawl_on_match and its companions for Google SERP
+ * on 2026-11-30 (requests carrying them are rejected). The SDK serializes
+ * `stop_crawl_on_match: null` on every SERP request even when unset, so the
+ * keys are stripped from each task object before the request leaves.
+ */
+export const RETIRED_SERP_FIELDS = [
+  "stop_crawl_on_match",
+  "find_targets_in",
+  "ignore_targets_in",
+  "target_search_mode",
+] as const;
+
+export function stripRetiredSerpFields(body: BodyInit | null | undefined) {
+  if (typeof body !== "string") return body;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (!Array.isArray(parsed)) return body;
+  const retired = new Set<string>(RETIRED_SERP_FIELDS);
+  const cleaned: unknown[] = parsed.map((task: unknown) =>
+    task && typeof task === "object" && !Array.isArray(task)
+      ? Object.fromEntries(
+          Object.entries(task).filter(([key]) => !retired.has(key)),
+        )
+      : task,
+  );
+  return JSON.stringify(cleaned);
+}
+
+function serpHttp() {
+  const authed = createAuthenticatedFetch();
+  return {
+    fetch: (url: RequestInfo, init?: RequestInit) =>
+      authed(url, init && { ...init, body: stripRetiredSerpFields(init.body) }),
+  };
+}
+
+export const serpApi = () => new SerpApi(API_BASE, serpHttp());
 export const businessDataApi = () => new BusinessDataApi(API_BASE, http());
 // task_post creates a billed task. A 5xx does not prove the provider skipped
 // the charge, so this client must not replay it (same rule as Lighthouse).
